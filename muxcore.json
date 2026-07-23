@@ -3,8 +3,13 @@
   "description": "File-backed structured logging provider with JSONL output, log rotation, and dynamic level control",
   "version": "0.1.0",
   "author": "MuxCore",
-  "roles": ["infrastructure"],
-  "capabilities": ["logging.file"],
+  "roles": [
+    "infrastructure"
+  ],
+  "capabilities": [
+    "logging",
+    "logging.file"
+  ],
   "contracts": [
     {
       "repo": "github.com/Muxcore-Media/core/pkg/contracts",

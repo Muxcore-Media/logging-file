@@ -105,7 +105,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 		Roles:        []string{"infrastructure"},
 		Description:  "File-backed structured logging provider with JSONL output, log rotation, and dynamic level control",
 		Author:       "MuxCore",
-		Capabilities: []string{contracts.CapabilityLogging},
+		Capabilities: []string{contracts.CapabilityLogging, "logging.file"},
 		Contracts: []contracts.ContractDeclaration{
 			{
 				Repo:      "github.com/Muxcore-Media/core/pkg/contracts",
