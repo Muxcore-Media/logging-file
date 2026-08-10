@@ -408,3 +408,36 @@ func TestLevelFromString(t *testing.T) {
 		}
 	}
 }
+
+func TestSettingsLogPathAndLevel(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.log")
+	pathB := filepath.Join(dir, "b.log")
+	m := NewModule(Config{LogPath: pathA, GRPCAddr: "127.0.0.1:0", Level: "info", MaxSizeMB: 1, MaxBackups: 2})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defs := m.Settings()
+	if len(defs) != 5 {
+		t.Fatalf("Settings len=%d", len(defs))
+	}
+	if err := m.UpdateSetting("level", "error"); err != nil {
+		t.Fatal(err)
+	}
+	if loggingv1.Level(m.level.Load()) != loggingv1.Level_LEVEL_ERROR {
+		t.Fatal("level not updated")
+	}
+	if err := m.UpdateSetting("log_path", pathB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_ERROR, Message: "moved"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(pathB); err != nil {
+		t.Fatalf("expected log at %s: %v", pathB, err)
+	}
+}
