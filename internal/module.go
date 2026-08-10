@@ -20,6 +20,7 @@ import (
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	loggingv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/logging/v1"
+	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
 )
 
 var sensitivePrefixes = contracts.SensitiveLogFieldNames()
@@ -112,7 +113,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Logging File",
-		Version:      "0.1.0",
+		Version:      "0.1.1",
 		Roles:        []string{"infrastructure"},
 		Description:  "File-backed structured logging provider with JSONL output, log rotation, and dynamic level control",
 		Author:       "MuxCore",
@@ -168,6 +169,7 @@ func (m *Module) Init(ctx context.Context) error {
 func (m *Module) Start(ctx context.Context) error {
 	m.grpcSrv = grpc.NewServer()
 	loggingv1.RegisterLogServiceServer(m.grpcSrv, m)
+	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
 	go func() {
 		slog.Info("logging-file gRPC service started", "addr", m.grpcAddr)
