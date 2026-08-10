@@ -113,11 +113,11 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Logging File",
-		Version:      "0.1.1",
+		Version:      "0.1.2",
 		Roles:        []string{"infrastructure"},
 		Description:  "File-backed structured logging provider with JSONL output, log rotation, and dynamic level control",
 		Author:       "MuxCore",
-		Capabilities: []string{contracts.CapabilityLogging, "logging.file"},
+		Capabilities: []string{contracts.CapabilityLogging, "logging.file", "settings"},
 		Contracts: []contracts.ContractDeclaration{
 			{
 				Repo:      "github.com/Muxcore-Media/core/pkg/contracts",
