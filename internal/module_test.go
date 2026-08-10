@@ -13,6 +13,18 @@ import (
 	loggingv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/logging/v1"
 )
 
+func TestEnvRotationConfig(t *testing.T) {
+	t.Setenv("LOG_MAX_SIZE_MB", "7")
+	t.Setenv("LOG_MAX_BACKUPS", "5")
+	m := NewModule(Config{LogPath: filepath.Join(t.TempDir(), "env.log"), GRPCAddr: "127.0.0.1:0"})
+	if m.maxSize != 7*1024*1024 {
+		t.Fatalf("maxSize = %d want 7MiB", m.maxSize)
+	}
+	if m.maxBackups != 5 {
+		t.Fatalf("maxBackups = %d want 5", m.maxBackups)
+	}
+}
+
 func TestModuleInfo(t *testing.T) {
 	m := NewModule(Config{})
 	info := m.Info()

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,16 @@ func NewModule(cfg Config) *Module {
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.Level = v
+	}
+	if v := os.Getenv("LOG_MAX_SIZE_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.MaxSizeMB = n
+		}
+	}
+	if v := os.Getenv("LOG_MAX_BACKUPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.MaxBackups = n
+		}
 	}
 	mod := &Module{
 		id:         cfg.ID,
