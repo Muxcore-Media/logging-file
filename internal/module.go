@@ -64,7 +64,7 @@ func NewModule(cfg Config) *Module {
 		cfg.LogPath = "/var/lib/logging-file/module.log"
 	}
 	if cfg.GRPCAddr == "" {
-		cfg.GRPCAddr = ":9620"
+		cfg.GRPCAddr = ":9625"
 	}
 	if cfg.Level == "" {
 		cfg.Level = "info"
