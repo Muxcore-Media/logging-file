@@ -151,7 +151,7 @@ func (m *Module) Init(ctx context.Context) error {
 
 	lis, err := net.Listen("tcp", m.grpcAddr)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("listen %s: %w", m.grpcAddr, err)
 	}
 	m.lis = lis
@@ -186,10 +186,10 @@ func (m *Module) Stop(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	if m.buf != nil {
-		m.buf.Flush()
+		_ = m.buf.Flush()
 	}
 	if m.file != nil {
-		m.file.Close()
+		_ = m.file.Close()
 		m.file = nil
 	}
 	m.mu.Unlock()
@@ -255,25 +255,25 @@ func (m *Module) writeWithRotation(entry map[string]any) error {
 	}
 	m.fileSize += estimateSize(entry)
 	if m.fileSize >= m.maxSize {
-		m.buf.Flush()
+		_ = m.buf.Flush()
 	}
 	return nil
 }
 
 func (m *Module) rotate() error {
-	m.buf.Flush()
-	m.file.Close()
+	_ = m.buf.Flush()
+	_ = m.file.Close()
 
 	base := m.logPath
 	for i := m.maxBackups - 1; i >= 1; i-- {
 		old := fmt.Sprintf("%s.%d", base, i)
 		older := fmt.Sprintf("%s.%d", base, i+1)
 		if _, err := os.Stat(old); err == nil {
-			os.Rename(old, older)
+			_ = os.Rename(old, older)
 		}
 	}
 	if _, err := os.Stat(base); err == nil {
-		os.Rename(base, base+".1")
+		_ = os.Rename(base, base+".1")
 	}
 
 	f, err := os.OpenFile(base, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
@@ -309,8 +309,8 @@ func newLogEntry(level loggingv1.Level, msg string, fields map[string]string, so
 
 func writeStdout(level loggingv1.Level, entry map[string]any) {
 	data, _ := json.Marshal(entry)
-	os.Stdout.Write(data)
-	os.Stdout.Write([]byte{'\n'})
+	_, _ = os.Stdout.Write(data)
+	_, _ = os.Stdout.Write([]byte{'\n'})
 }
 
 func shouldLog(msgLevel, minLevel loggingv1.Level) bool {
