@@ -65,7 +65,7 @@ func newTestModule(t *testing.T) (*Module, string) {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() {
-		m.Stop(ctx)
+		_ = m.Stop(ctx)
 	})
 	return m, logPath
 }
@@ -76,7 +76,7 @@ func readLogLines(t *testing.T, path string) []map[string]any {
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var entries []map[string]any
 	sc := bufio.NewScanner(f)
@@ -109,7 +109,7 @@ func TestLogInfo(t *testing.T) {
 	}
 
 	m.mu.Lock()
-	m.buf.Flush()
+	_ = m.buf.Flush()
 	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
@@ -154,7 +154,7 @@ func TestLogAllLevels(t *testing.T) {
 	}
 
 	m.mu.Lock()
-	m.buf.Flush()
+	_ = m.buf.Flush()
 	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
@@ -185,11 +185,11 @@ func TestLevelFiltering(t *testing.T) {
 		{loggingv1.Level_LEVEL_ERROR, "should-be-kept"},
 	}
 	for _, m2 := range msgs {
-		m.Log(ctx, &loggingv1.LogRequest{Level: m2.level, Message: m2.msg})
+		_, _ = m.Log(ctx, &loggingv1.LogRequest{Level: m2.level, Message: m2.msg})
 	}
 
 	m.mu.Lock()
-	m.buf.Flush()
+	_ = m.buf.Flush()
 	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
@@ -214,11 +214,11 @@ func TestSetLevel(t *testing.T) {
 		t.Errorf("expected current level error, got %v", loggingv1.Level(m.level.Load()))
 	}
 
-	m.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_INFO, Message: "dropped"})
-	m.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_ERROR, Message: "kept"})
+	_, _ = m.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_INFO, Message: "dropped"})
+	_, _ = m.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_ERROR, Message: "kept"})
 
 	m.mu.Lock()
-	m.buf.Flush()
+	_ = m.buf.Flush()
 	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
@@ -249,7 +249,7 @@ func TestRedactSensitiveFields(t *testing.T) {
 	}
 
 	m.mu.Lock()
-	m.buf.Flush()
+	_ = m.buf.Flush()
 	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
@@ -285,17 +285,17 @@ func TestRotation(t *testing.T) {
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer m.Stop(ctx)
+	defer func() { _ = m.Stop(ctx) }()
 
 	for i := 0; i < 200; i++ {
-		m.Log(ctx, &loggingv1.LogRequest{
+		_, _ = m.Log(ctx, &loggingv1.LogRequest{
 			Level:   loggingv1.Level_LEVEL_INFO,
 			Message: strings.Repeat("x", 200),
 		})
 	}
 
 	m.mu.Lock()
-	m.buf.Flush()
+	_ = m.buf.Flush()
 	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
@@ -348,7 +348,7 @@ func TestConcurrentLogging(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-				m.Log(ctx, &loggingv1.LogRequest{
+				_, _ = m.Log(ctx, &loggingv1.LogRequest{
 					Level:        loggingv1.Level_LEVEL_INFO,
 					Message:      "concurrent",
 					SourceModule: "test",
@@ -360,7 +360,7 @@ func TestConcurrentLogging(t *testing.T) {
 	wg.Wait()
 
 	m.mu.Lock()
-	m.buf.Flush()
+	_ = m.buf.Flush()
 	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
