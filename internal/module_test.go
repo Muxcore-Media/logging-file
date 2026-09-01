@@ -4,12 +4,21 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/Muxcore-Media/core/pkg/contracts"
 	loggingv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/logging/v1"
 )
 
@@ -25,14 +34,33 @@ func TestEnvRotationConfig(t *testing.T) {
 	}
 }
 
+func TestEnvInvalidMaxSizeWarnsAndKeepsDefault(t *testing.T) {
+	t.Setenv("LOG_MAX_SIZE_MB", "nope")
+	m := NewModule(Config{LogPath: filepath.Join(t.TempDir(), "bad.log"), GRPCAddr: "127.0.0.1:0"})
+	if m.maxSize != 100*1024*1024 {
+		t.Fatalf("maxSize = %d want default 100MiB", m.maxSize)
+	}
+}
+
+func TestEnvStdoutTruthy(t *testing.T) {
+	for _, v := range []string{"1", "yes", "on", "true"} {
+		t.Setenv("LOG_STDOUT", v)
+		m := NewModule(Config{LogPath: filepath.Join(t.TempDir(), "stdout.log"), GRPCAddr: "127.0.0.1:0"})
+		if !m.stdout {
+			t.Fatalf("LOG_STDOUT=%q should enable stdout", v)
+		}
+	}
+}
+
 func TestModuleInfo(t *testing.T) {
+	Version = "0.1.2"
 	m := NewModule(Config{})
 	info := m.Info()
 	if info.ID == "" {
 		t.Error("module ID must not be empty")
 	}
-	if info.Version == "" {
-		t.Error("module version must not be empty")
+	if info.Version != "0.1.2" {
+		t.Errorf("version = %q want 0.1.2", info.Version)
 	}
 	if info.MinCoreVersion == "" {
 		t.Error("MinCoreVersion must not be empty")
@@ -51,18 +79,33 @@ func TestModuleInfo(t *testing.T) {
 	}
 }
 
+func TestStructuredLoggerInterface(t *testing.T) {
+	m := NewModule(Config{LogPath: filepath.Join(t.TempDir(), "iface.log"), GRPCAddr: "127.0.0.1:0", SkipListen: true})
+	log := m.Logger()
+	var _ = log.(contracts.RedactingLogger)
+	if !log.(contracts.RedactingLogger).IsRedacting() {
+		t.Fatal("expected redacting logger")
+	}
+}
+
 func newTestModule(t *testing.T) (*Module, string) {
 	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "test.log")
 	m := NewModule(Config{
-		LogPath:  logPath,
-		GRPCAddr: ":0",
-		Level:    "debug",
+		LogPath:    logPath,
+		GRPCAddr:   "127.0.0.1:0",
+		Level:      "debug",
+		SkipListen: true,
 	})
 	ctx := context.Background()
 	if err := m.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
+	}
+	lis := bufconn.Listen(1 << 20)
+	m.SetListener(lis)
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
@@ -108,10 +151,6 @@ func TestLogInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.mu.Lock()
-	_ = m.buf.Flush()
-	m.mu.Unlock()
-
 	entries := readLogLines(t, logPath)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 log entry, got %d", len(entries))
@@ -130,6 +169,36 @@ func TestLogInfo(t *testing.T) {
 	}
 	if _, ok := entries[0]["timestamp"]; !ok {
 		t.Error("expected timestamp field")
+	}
+}
+
+func TestLogReadableWithoutStop(t *testing.T) {
+	m, logPath := newTestModule(t)
+	ctx := context.Background()
+	_, err := m.Log(ctx, &loggingv1.LogRequest{
+		Level:   loggingv1.Level_LEVEL_INFO,
+		Message: "flush test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := readLogLines(t, logPath)
+	if len(entries) != 1 || entries[0]["message"] != "flush test" {
+		t.Fatalf("expected flushed entry on disk, got %#v", entries)
+	}
+}
+
+func TestStructuredLoggerMethods(t *testing.T) {
+	m, logPath := newTestModule(t)
+	ctx := context.Background()
+	log := m.Logger()
+	log.Debug(ctx, "dbg", map[string]any{"k": "v"})
+	log.Info(ctx, "inf", nil)
+	log.Warn(ctx, "wrn", nil)
+	log.Error(ctx, "err", nil)
+	entries := readLogLines(t, logPath)
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
 	}
 }
 
@@ -152,10 +221,6 @@ func TestLogAllLevels(t *testing.T) {
 			t.Fatalf("Log %s: %v", levelString(l), err)
 		}
 	}
-
-	m.mu.Lock()
-	_ = m.buf.Flush()
-	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
 	if len(entries) != 4 {
@@ -188,10 +253,6 @@ func TestLevelFiltering(t *testing.T) {
 		_, _ = m.Log(ctx, &loggingv1.LogRequest{Level: m2.level, Message: m2.msg})
 	}
 
-	m.mu.Lock()
-	_ = m.buf.Flush()
-	m.mu.Unlock()
-
 	entries := readLogLines(t, logPath)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 log entries (warn+error), got %d", len(entries))
@@ -216,10 +277,6 @@ func TestSetLevel(t *testing.T) {
 
 	_, _ = m.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_INFO, Message: "dropped"})
 	_, _ = m.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_ERROR, Message: "kept"})
-
-	m.mu.Lock()
-	_ = m.buf.Flush()
-	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
 	if len(entries) != 1 {
@@ -248,10 +305,6 @@ func TestRedactSensitiveFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.mu.Lock()
-	_ = m.buf.Flush()
-	m.mu.Unlock()
-
 	entries := readLogLines(t, logPath)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -274,9 +327,11 @@ func TestRotation(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "rotating.log")
 	m := NewModule(Config{
-		LogPath:  logPath,
-		GRPCAddr: ":0",
-		Level:    "debug",
+		LogPath:    logPath,
+		GRPCAddr:   "127.0.0.1:0",
+		Level:      "debug",
+		MaxBackups: 2,
+		SkipListen: true,
 	})
 	m.mu.Lock()
 	m.maxSize = 256
@@ -285,27 +340,28 @@ func TestRotation(t *testing.T) {
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	lis := bufconn.Listen(1 << 20)
+	m.SetListener(lis)
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
 	defer func() { _ = m.Stop(ctx) }()
 
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 400; i++ {
 		_, _ = m.Log(ctx, &loggingv1.LogRequest{
 			Level:   loggingv1.Level_LEVEL_INFO,
 			Message: strings.Repeat("x", 200),
 		})
 	}
 
-	m.mu.Lock()
-	_ = m.buf.Flush()
-	m.mu.Unlock()
-
-	entries := readLogLines(t, logPath)
-	if len(entries) == 0 {
-		t.Fatal("expected entries in current log file")
+	if _, err := os.Stat(logPath + ".1"); err != nil {
+		t.Fatalf("expected rotated file .1: %v", err)
 	}
-
-	rotatedPath := logPath + ".1"
-	if _, err := os.Stat(rotatedPath); err != nil {
-		t.Fatalf("expected rotated file %s: %v", rotatedPath, err)
+	if _, err := os.Stat(logPath + ".2"); err != nil {
+		t.Fatalf("expected rotated file .2: %v", err)
+	}
+	if _, err := os.Stat(logPath + ".3"); !os.IsNotExist(err) {
+		t.Fatalf("expected no .3 backup beyond max_backups=2, err=%v", err)
 	}
 }
 
@@ -313,20 +369,71 @@ func TestHealth(t *testing.T) {
 	m, _ := newTestModule(t)
 	ctx := context.Background()
 	if err := m.Health(ctx); err != nil {
-		t.Fatal("expected health to pass after init")
+		t.Fatalf("expected health to pass after start: %v", err)
+	}
+}
+
+func TestHealthFailsAfterStop(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "stop.log")
+	m := NewModule(Config{LogPath: logPath, GRPCAddr: "127.0.0.1:0", SkipListen: true})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lis := bufconn.Listen(1 << 20)
+	m.SetListener(lis)
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Health(ctx); err == nil {
+		t.Fatal("expected health failure after stop")
+	}
+}
+
+func TestHealthFailsBeforeStart(t *testing.T) {
+	dir := t.TempDir()
+	m := NewModule(Config{LogPath: filepath.Join(dir, "h.log"), GRPCAddr: "127.0.0.1:0", SkipListen: true})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Health(ctx); err == nil {
+		t.Fatal("expected health failure before start")
+	}
+}
+
+func TestInitListenFailureClearsFile(t *testing.T) {
+	dir := t.TempDir()
+	m := NewModule(Config{LogPath: filepath.Join(dir, "fail.log"), GRPCAddr: "invalid://bad"})
+	ctx := context.Background()
+	if err := m.Init(ctx); err == nil {
+		t.Fatal("expected listen failure")
+	}
+	m.mu.RLock()
+	f := m.file
+	m.mu.RUnlock()
+	if f != nil {
+		t.Fatal("expected file nil after init listen failure")
 	}
 }
 
 func TestLifecycle(t *testing.T) {
 	m := NewModule(Config{
-		LogPath:  filepath.Join(t.TempDir(), "lifecycle.log"),
-		GRPCAddr: ":0",
+		LogPath:    filepath.Join(t.TempDir(), "lifecycle.log"),
+		GRPCAddr:   "127.0.0.1:0",
+		SkipListen: true,
 	})
 	ctx := context.Background()
 
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	lis := bufconn.Listen(1 << 20)
+	m.SetListener(lis)
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -358,10 +465,6 @@ func TestConcurrentLogging(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-
-	m.mu.Lock()
-	_ = m.buf.Flush()
-	m.mu.Unlock()
 
 	entries := readLogLines(t, logPath)
 	expected := 50 * 20
@@ -413,14 +516,19 @@ func TestSettingsLogPathAndLevel(t *testing.T) {
 	dir := t.TempDir()
 	pathA := filepath.Join(dir, "a.log")
 	pathB := filepath.Join(dir, "b.log")
-	m := NewModule(Config{LogPath: pathA, GRPCAddr: "127.0.0.1:0", Level: "info", MaxSizeMB: 1, MaxBackups: 2})
+	m := NewModule(Config{LogPath: pathA, GRPCAddr: "127.0.0.1:0", Level: "info", MaxSizeMB: 1, MaxBackups: 2, SkipListen: true})
 	ctx := context.Background()
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	lis := bufconn.Listen(1 << 20)
+	m.SetListener(lis)
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
 	defs := m.Settings()
-	if len(defs) != 5 {
-		t.Fatalf("Settings len=%d", len(defs))
+	if len(defs) != 6 {
+		t.Fatalf("Settings len=%d want 6", len(defs))
 	}
 	if err := m.UpdateSetting("level", "error"); err != nil {
 		t.Fatal(err)
@@ -439,5 +547,114 @@ func TestSettingsLogPathAndLevel(t *testing.T) {
 	}
 	if _, err := os.Stat(pathB); err != nil {
 		t.Fatalf("expected log at %s: %v", pathB, err)
+	}
+}
+
+func TestSettingsStdoutMaxBackupsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	m := NewModule(Config{LogPath: filepath.Join(dir, "s.log"), GRPCAddr: "127.0.0.1:0", SkipListen: true})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"yes", "on", "1"} {
+		if err := m.UpdateSetting("stdout", v); err != nil {
+			t.Fatalf("stdout %q: %v", v, err)
+		}
+	}
+	m.mu.RLock()
+	if !m.stdout {
+		t.Fatal("stdout not enabled")
+	}
+	m.mu.RUnlock()
+	if err := m.UpdateSetting("max_size_mb", "12"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.UpdateSetting("max_backups", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.UpdateSetting("nope", "x"); err == nil {
+		t.Fatal("expected unknown setting error")
+	}
+	_ = m.Stop(ctx)
+}
+
+func TestLogPathEscapeRejected(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "logs")
+	m := NewModule(Config{LogPath: filepath.Join(root, "app.log"), AllowedRoot: root, SkipListen: true})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.log")
+	if err := m.UpdateSetting("log_path", outside); err == nil {
+		t.Fatal("expected rejection for path outside allowed root")
+	}
+	if err := m.UpdateSetting("log_path", filepath.Join(root, "..", "escape.log")); err == nil {
+		t.Fatal("expected rejection for .. escape")
+	}
+	_ = m.Stop(ctx)
+}
+
+func TestGRPCAuthDeniedAndAllowed(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "auth.log")
+	m := NewModule(Config{
+		LogPath:     logPath,
+		ModuleToken: "sekrit",
+		SkipListen:  true,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lis := bufconn.Listen(1 << 20)
+	m.SetListener(lis)
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.Stop(ctx) }()
+
+	dialer := func(context.Context, string) (net.Conn, error) { return lis.Dial() }
+	conn, err := grpc.NewClient("passthrough:///bufconn",
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	cli := loggingv1.NewLogServiceClient(conn)
+
+	_, err = cli.Log(ctx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_INFO, Message: "nope"})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated, got %v", err)
+	}
+
+	mdCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("x-caller-id", "peer-mod"))
+	_, err = cli.Log(mdCtx, &loggingv1.LogRequest{Level: loggingv1.Level_LEVEL_INFO, Message: "ok"})
+	if err != nil {
+		t.Fatalf("authed log: %v", err)
+	}
+
+	tokenCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer sekrit"))
+	_, err = cli.SetLevel(tokenCtx, &loggingv1.SetLevelRequest{Level: loggingv1.Level_LEVEL_WARN})
+	if err != nil {
+		t.Fatalf("token set level: %v", err)
+	}
+}
+
+func TestValidateLogPath(t *testing.T) {
+	root := t.TempDir()
+	if err := validateLogPath("", root); err == nil {
+		t.Fatal("empty path")
+	}
+	if err := validateLogPath(filepath.Join(root, "..", "x.log"), root); err == nil {
+		t.Fatal(".. path")
+	}
+	ok := filepath.Join(root, "ok.log")
+	if err := validateLogPath(ok, root); err != nil {
+		t.Fatalf("valid path: %v", err)
 	}
 }

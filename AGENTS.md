@@ -7,8 +7,10 @@ MuxCore sidecar module (`logging-file`). Workspace deploy and SSH: [`../AGENTS.m
 | Field | Value |
 |-------|-------|
 | Directory | `logging-file` |
-| Capabilities | see muxcore.json |
-| Contracts | none declared |
+| Capabilities | `logging`, `logging.file`, `settings` |
+| Contracts | `StructuredLogger` (v0.4.0) |
+
+Enable in the MVP stack with `MVP_ENABLE_LOGGING_FILE=1` in `_mvp/.env` (see `_mvp/run-host.sh`).
 
 ## Agent rules
 
@@ -22,5 +24,7 @@ MuxCore sidecar module (`logging-file`). Workspace deploy and SSH: [`../AGENTS.m
 
 ```bash
 cd logging-file
-go test ./...
+nix-shell -p go --run 'go test -race ./...'
 ```
+
+Remote callers use `pkg/client` (StructuredLogger over LogService gRPC).

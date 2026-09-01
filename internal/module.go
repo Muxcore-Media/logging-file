@@ -38,22 +38,34 @@ type Module struct {
 	fileSize   int64
 	maxSize    int64
 	maxBackups int
+	flushMs    int
 
-	id       string
-	logPath  string
-	grpcAddr string
-	grpcSrv  *grpc.Server
-	lis      net.Listener
+	id          string
+	logPath     string
+	allowedRoot string
+	grpcAddr    string
+	moduleToken string
+	skipListen  bool
+	grpcSrv     *grpc.Server
+	lis         net.Listener
+
+	flushStop chan struct{}
+	flushDone sync.WaitGroup
 }
 
 type Config struct {
-	ID         string
-	LogPath    string
-	GRPCAddr   string
-	Stdout     bool
-	Level      string
-	MaxSizeMB  int
-	MaxBackups int
+	ID          string
+	LogPath     string
+	AllowedRoot string
+	GRPCAddr    string
+	Stdout      bool
+	Level       string
+	MaxSizeMB   int
+	MaxBackups  int
+	FlushMs     int
+	ModuleToken string
+	Version     string
+	SkipListen  bool
 }
 
 func NewModule(cfg Config) *Module {
@@ -75,45 +87,75 @@ func NewModule(cfg Config) *Module {
 	if cfg.MaxBackups == 0 {
 		cfg.MaxBackups = 3
 	}
+	if cfg.FlushMs == 0 {
+		cfg.FlushMs = 250
+	}
+	if cfg.AllowedRoot == "" {
+		cfg.AllowedRoot = filepath.Dir(cfg.LogPath)
+	}
 	if v := os.Getenv("LOG_FILE_PATH"); v != "" {
 		cfg.LogPath = v
+	}
+	if v := os.Getenv("LOG_ALLOWED_ROOT"); v != "" {
+		cfg.AllowedRoot = v
+	} else if cfg.AllowedRoot == "" || cfg.AllowedRoot == filepath.Dir("/var/lib/logging-file/module.log") {
+		cfg.AllowedRoot = filepath.Dir(cfg.LogPath)
 	}
 	if v := os.Getenv("LOG_GRPC_ADDR"); v != "" {
 		cfg.GRPCAddr = v
 	}
-	if v := os.Getenv("LOG_STDOUT"); v == "true" {
+	if parseBoolEnv(os.Getenv("LOG_STDOUT")) {
 		cfg.Stdout = true
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.Level = v
 	}
 	if v := os.Getenv("LOG_MAX_SIZE_MB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err != nil || n < 1 {
+			slog.Warn("invalid LOG_MAX_SIZE_MB, using default", "value", v, "default", cfg.MaxSizeMB)
+		} else {
 			cfg.MaxSizeMB = n
 		}
 	}
 	if v := os.Getenv("LOG_MAX_BACKUPS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err != nil || n < 1 {
+			slog.Warn("invalid LOG_MAX_BACKUPS, using default", "value", v, "default", cfg.MaxBackups)
+		} else {
 			cfg.MaxBackups = n
 		}
 	}
+	if v := os.Getenv("LOG_FLUSH_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil || n < 1 {
+			slog.Warn("invalid LOG_FLUSH_MS, using default", "value", v, "default", cfg.FlushMs)
+		} else {
+			cfg.FlushMs = n
+		}
+	}
+	if cfg.ModuleToken == "" {
+		cfg.ModuleToken = moduleTokenFromEnv()
+	}
 	mod := &Module{
-		id:         cfg.ID,
-		logPath:    cfg.LogPath,
-		grpcAddr:   cfg.GRPCAddr,
-		stdout:     cfg.Stdout,
-		maxSize:    int64(cfg.MaxSizeMB) * 1024 * 1024,
-		maxBackups: cfg.MaxBackups,
+		id:          cfg.ID,
+		logPath:     cfg.LogPath,
+		allowedRoot: cfg.AllowedRoot,
+		grpcAddr:    cfg.GRPCAddr,
+		stdout:      cfg.Stdout,
+		maxSize:     int64(cfg.MaxSizeMB) * 1024 * 1024,
+		maxBackups:  cfg.MaxBackups,
+		flushMs:     cfg.FlushMs,
+		moduleToken: cfg.ModuleToken,
+		skipListen:  cfg.SkipListen,
 	}
 	mod.level.Store(levelFromString(cfg.Level))
 	return mod
 }
 
 func (m *Module) Info() contracts.ModuleInfo {
+	ver := Version
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Logging File",
-		Version:      "0.1.2",
+		Version:      ver,
 		Roles:        []string{"infrastructure"},
 		Description:  "File-backed structured logging provider with JSONL output, log rotation, and dynamic level control",
 		Author:       "MuxCore",
@@ -131,6 +173,9 @@ func (m *Module) Info() contracts.ModuleInfo {
 }
 
 func (m *Module) Init(ctx context.Context) error {
+	if err := validateLogPath(m.logPath, m.allowedRoot); err != nil {
+		return err
+	}
 	dir := filepath.Dir(m.logPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create log directory %s: %w", dir, err)
@@ -149,12 +194,19 @@ func (m *Module) Init(ctx context.Context) error {
 	m.fileSize = info.Size()
 	m.mu.Unlock()
 
-	lis, err := net.Listen("tcp", m.grpcAddr)
-	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("listen %s: %w", m.grpcAddr, err)
+	if !m.skipListen {
+		lis, err := net.Listen("tcp", m.grpcAddr)
+		if err != nil {
+			_ = f.Close()
+			m.mu.Lock()
+			m.file = nil
+			m.buf = nil
+			m.enc = nil
+			m.mu.Unlock()
+			return fmt.Errorf("listen %s: %w", m.grpcAddr, err)
+		}
+		m.lis = lis
 	}
-	m.lis = lis
 
 	slog.Info("logging-file initialized",
 		"path", m.logPath,
@@ -162,28 +214,43 @@ func (m *Module) Init(ctx context.Context) error {
 		"level", m.level.Load(),
 		"stdout", m.stdout,
 		"max_size_mb", cfgMaxSizeMB(m.maxSize),
+		"flush_ms", m.flushMs,
 	)
 	return nil
 }
 
 func (m *Module) Start(ctx context.Context) error {
-	m.grpcSrv = grpc.NewServer()
+	if m.lis == nil {
+		return errors.New("gRPC listener not configured")
+	}
+	m.grpcSrv = grpc.NewServer(grpc.UnaryInterceptor(authUnaryInterceptor(m.moduleToken)))
 	loggingv1.RegisterLogServiceServer(m.grpcSrv, m)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
-	go func() {
+	m.flushStop = make(chan struct{})
+	m.flushDone.Add(1)
+	go m.flushLoop()
+
+	go func(srv *grpc.Server, lis net.Listener) {
 		slog.Info("logging-file gRPC service started", "addr", m.grpcAddr)
-		if err := m.grpcSrv.Serve(m.lis); err != nil {
+		if err := srv.Serve(lis); err != nil {
 			slog.Error("logging-file gRPC serve error", "error", err)
 		}
-	}()
+	}(m.grpcSrv, m.lis)
 	return nil
 }
 
 func (m *Module) Stop(ctx context.Context) error {
+	if m.flushStop != nil {
+		close(m.flushStop)
+		m.flushDone.Wait()
+		m.flushStop = nil
+	}
 	if m.grpcSrv != nil {
 		m.grpcSrv.GracefulStop()
+		m.grpcSrv = nil
 	}
+	m.lis = nil
 	m.mu.Lock()
 	if m.buf != nil {
 		_ = m.buf.Flush()
@@ -191,6 +258,8 @@ func (m *Module) Stop(ctx context.Context) error {
 	if m.file != nil {
 		_ = m.file.Close()
 		m.file = nil
+		m.buf = nil
+		m.enc = nil
 	}
 	m.mu.Unlock()
 	slog.Info("logging-file stopped")
@@ -200,9 +269,17 @@ func (m *Module) Stop(ctx context.Context) error {
 func (m *Module) Health(ctx context.Context) error {
 	m.mu.RLock()
 	f := m.file
+	srv := m.grpcSrv
+	lis := m.lis
 	m.mu.RUnlock()
 	if f == nil {
 		return errors.New("log file not open")
+	}
+	if srv == nil || lis == nil {
+		return errors.New("gRPC service not serving")
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("log file not writable: %w", err)
 	}
 	return nil
 }
@@ -216,18 +293,15 @@ func (m *Module) Log(ctx context.Context, req *loggingv1.LogRequest) (*loggingv1
 	entry := newLogEntry(level, req.GetMessage(), req.GetFields(), req.GetSourceModule())
 
 	m.mu.RLock()
-	enc := m.enc
 	stdout := m.stdout
 	m.mu.RUnlock()
 
-	if enc != nil {
-		m.mu.Lock()
-		if err := m.writeWithRotation(entry); err != nil {
-			m.mu.Unlock()
-			return nil, fmt.Errorf("write log: %w", err)
-		}
+	m.mu.Lock()
+	if err := m.writeWithRotation(entry); err != nil {
 		m.mu.Unlock()
+		return nil, fmt.Errorf("write log: %w", err)
 	}
+	m.mu.Unlock()
 
 	if stdout {
 		writeStdout(level, entry)
@@ -254,8 +328,11 @@ func (m *Module) writeWithRotation(entry map[string]any) error {
 		return err
 	}
 	m.fileSize += estimateSize(entry)
+	if err := m.buf.Flush(); err != nil {
+		return err
+	}
 	if m.fileSize >= m.maxSize {
-		_ = m.buf.Flush()
+		return m.rotate()
 	}
 	return nil
 }
@@ -275,6 +352,7 @@ func (m *Module) rotate() error {
 	if _, err := os.Stat(base); err == nil {
 		_ = os.Rename(base, base+".1")
 	}
+	m.pruneRotatedFiles()
 
 	f, err := os.OpenFile(base, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
 	if err != nil {
@@ -286,6 +364,38 @@ func (m *Module) rotate() error {
 	m.enc = json.NewEncoder(m.buf)
 	m.fileSize = 0
 	return nil
+}
+
+func (m *Module) pruneRotatedFiles() {
+	base := m.logPath
+	for i := m.maxBackups + 1; ; i++ {
+		p := fmt.Sprintf("%s.%d", base, i)
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			break
+		}
+		_ = os.Remove(p)
+	}
+}
+
+func (m *Module) flushLoop() {
+	defer m.flushDone.Done()
+	if m.flushMs <= 0 {
+		return
+	}
+	ticker := time.NewTicker(time.Duration(m.flushMs) * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.flushStop:
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			if m.buf != nil {
+				_ = m.buf.Flush()
+			}
+			m.mu.Unlock()
+		}
+	}
 }
 
 func newLogEntry(level loggingv1.Level, msg string, fields map[string]string, source string) map[string]any {
@@ -347,6 +457,30 @@ func levelFromString(s string) int32 {
 	}
 }
 
+func contractsLogLevel(l loggingv1.Level) contracts.LogLevel {
+	switch l {
+	case loggingv1.Level_LEVEL_DEBUG:
+		return contracts.LogLevelDebug
+	case loggingv1.Level_LEVEL_INFO:
+		return contracts.LogLevelInfo
+	case loggingv1.Level_LEVEL_WARN:
+		return contracts.LogLevelWarn
+	case loggingv1.Level_LEVEL_ERROR:
+		return contracts.LogLevelError
+	default:
+		return contracts.LogLevelInfo
+	}
+}
+
+func parseBoolEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func isSensitive(key string) bool {
 	lower := strings.ToLower(key)
 	for _, prefix := range sensitivePrefixes {
@@ -364,6 +498,16 @@ func estimateSize(entry map[string]any) int64 {
 
 func cfgMaxSizeMB(bytes int64) int64 {
 	return bytes / (1024 * 1024)
+}
+
+// SetListener attaches a net.Listener before Start (tests).
+func (m *Module) SetListener(lis net.Listener) {
+	m.lis = lis
+}
+
+// AuthUnaryInterceptor returns the LogService auth interceptor.
+func AuthUnaryInterceptor(moduleToken string) grpc.UnaryServerInterceptor {
+	return authUnaryInterceptor(moduleToken)
 }
 
 var _ contracts.Module = (*Module)(nil)
