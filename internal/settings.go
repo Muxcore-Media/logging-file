@@ -27,6 +27,7 @@ func (m *Module) settingsDefs() []contracts.SettingDef {
 	stdout := m.stdout
 	maxMB := cfgMaxSizeMB(m.maxSize)
 	backups := m.maxBackups
+	flushMs := m.flushMs
 	m.mu.RUnlock()
 	level := levelString(loggingv1.Level(m.level.Load()))
 	return []contracts.SettingDef{
@@ -56,6 +57,15 @@ func (m *Module) settingsDefs() []contracts.SettingDef {
 			Value:       strconv.FormatBool(stdout),
 			Default:     "false",
 			Description: "Mirror entries to stdout (LOG_STDOUT)",
+			Group:       "Output",
+		},
+		{
+			Key:         "flush_ms",
+			Label:       "Flush Interval (ms)",
+			Type:        contracts.SettingTypeInt,
+			Value:       strconv.Itoa(flushMs),
+			Default:     "250",
+			Description: "Background buffer flush interval (LOG_FLUSH_MS)",
 			Group:       "Output",
 		},
 		{
@@ -109,6 +119,15 @@ func (m *Module) updateSetting(key, value string) error {
 			return fmt.Errorf("invalid stdout %q (true/false)", value)
 		}
 		return nil
+	case "flush_ms", "LOG_FLUSH_MS":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("invalid flush_ms %q (integer >= 1)", value)
+		}
+		m.mu.Lock()
+		m.flushMs = n
+		m.mu.Unlock()
+		return nil
 	case "max_size_mb", "LOG_MAX_SIZE_MB":
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 1 {
@@ -125,6 +144,7 @@ func (m *Module) updateSetting(key, value string) error {
 		}
 		m.mu.Lock()
 		m.maxBackups = n
+		m.pruneRotatedFiles()
 		m.mu.Unlock()
 		return nil
 	default:
@@ -132,7 +152,39 @@ func (m *Module) updateSetting(key, value string) error {
 	}
 }
 
+func validateLogPath(path, allowedRoot string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("log_path must not be empty")
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("log_path must not contain .. segments")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve log_path: %w", err)
+	}
+	absRoot, err := filepath.Abs(allowedRoot)
+	if err != nil {
+		return fmt.Errorf("resolve allowed root: %w", err)
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return fmt.Errorf("log_path outside allowed root: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("log_path must be under %s", allowedRoot)
+	}
+	return nil
+}
+
 func (m *Module) reopenLogPath(path string) error {
+	m.mu.RLock()
+	root := m.allowedRoot
+	m.mu.RUnlock()
+	if err := validateLogPath(path, root); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}

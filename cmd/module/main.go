@@ -9,7 +9,10 @@ import (
 	"github.com/Muxcore-Media/logging-file/internal"
 )
 
+var version = "0.0.0-dev"
+
 func main() {
+	internal.Version = version
 	mod := internal.NewModule(internal.Config{})
 	insecure := os.Getenv("MUXCORE_INSECURE_DISABLE_TLS") == "true" || os.Getenv("MUXCORE_GRPC_INSECURE") == "true"
 	if err := modulesdk.Run(modulesdk.Config{
