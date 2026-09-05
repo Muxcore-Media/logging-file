@@ -90,6 +90,7 @@ func TestStructuredLoggerInterface(t *testing.T) {
 
 func newTestModule(t *testing.T) (*Module, string) {
 	t.Helper()
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "test.log")
 	m := NewModule(Config{
@@ -324,6 +325,7 @@ func TestRedactSensitiveFields(t *testing.T) {
 }
 
 func TestRotation(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "rotating.log")
 	m := NewModule(Config{
@@ -374,6 +376,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHealthFailsAfterStop(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "stop.log")
 	m := NewModule(Config{LogPath: logPath, GRPCAddr: "127.0.0.1:0", SkipListen: true})
@@ -394,7 +397,36 @@ func TestHealthFailsAfterStop(t *testing.T) {
 	}
 }
 
+func TestModuleLifecycleTLS(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "")
+	t.Setenv("MUXCORE_GRPC_INSECURE", "")
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tls.log")
+	m := NewModule(Config{
+		LogPath:    logPath,
+		GRPCAddr:   "127.0.0.1:0",
+		SkipListen: true,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetListener(lis)
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 func TestHealthFailsBeforeStart(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	dir := t.TempDir()
 	m := NewModule(Config{LogPath: filepath.Join(dir, "h.log"), GRPCAddr: "127.0.0.1:0", SkipListen: true})
 	ctx := context.Background()
@@ -422,6 +454,7 @@ func TestInitListenFailureClearsFile(t *testing.T) {
 }
 
 func TestLifecycle(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	m := NewModule(Config{
 		LogPath:    filepath.Join(t.TempDir(), "lifecycle.log"),
 		GRPCAddr:   "127.0.0.1:0",
@@ -513,6 +546,7 @@ func TestLevelFromString(t *testing.T) {
 }
 
 func TestSettingsLogPathAndLevel(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	dir := t.TempDir()
 	pathA := filepath.Join(dir, "a.log")
 	pathB := filepath.Join(dir, "b.log")
@@ -598,6 +632,7 @@ func TestLogPathEscapeRejected(t *testing.T) {
 }
 
 func TestGRPCAuthDeniedAndAllowed(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "auth.log")
 	m := NewModule(Config{
