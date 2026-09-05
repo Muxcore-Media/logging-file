@@ -17,10 +17,12 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	loggingv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/logging/v1"
 	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
+	"github.com/Muxcore-Media/logging-file/internal/grpctls"
 )
 
 var sensitivePrefixes = contracts.SensitiveLogFieldNames()
@@ -78,6 +80,7 @@ func NewModule(cfg Config) *Module {
 	if cfg.GRPCAddr == "" {
 		cfg.GRPCAddr = ":9625"
 	}
+	cfg.GRPCAddr = resolveGRPCAddr(cfg.GRPCAddr)
 	if cfg.Level == "" {
 		cfg.Level = "info"
 	}
@@ -102,7 +105,7 @@ func NewModule(cfg Config) *Module {
 		cfg.AllowedRoot = filepath.Dir(cfg.LogPath)
 	}
 	if v := os.Getenv("LOG_GRPC_ADDR"); v != "" {
-		cfg.GRPCAddr = v
+		cfg.GRPCAddr = resolveGRPCAddr(v)
 	}
 	if parseBoolEnv(os.Getenv("LOG_STDOUT")) {
 		cfg.Stdout = true
@@ -223,7 +226,22 @@ func (m *Module) Start(ctx context.Context) error {
 	if m.lis == nil {
 		return errors.New("gRPC listener not configured")
 	}
-	m.grpcSrv = grpc.NewServer(grpc.UnaryInterceptor(authUnaryInterceptor(m.moduleToken)))
+	var grpcOpts []grpc.ServerOption
+	tlsCfg, err := grpctls.ServerConfig(m.logPath)
+	if err != nil {
+		return fmt.Errorf("gRPC TLS: %w", err)
+	}
+	if tlsCfg != nil {
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		slog.Info("logging-file gRPC TLS enabled", "addr", m.grpcAddr)
+	} else {
+		slog.Warn("logging-file gRPC listening without TLS (dev only)",
+			"addr", m.grpcAddr,
+			"hint", "unset MUXCORE_INSECURE_DISABLE_TLS for production",
+		)
+	}
+	grpcOpts = append(grpcOpts, grpc.UnaryInterceptor(authUnaryInterceptor(m.moduleToken)))
+	m.grpcSrv = grpc.NewServer(grpcOpts...)
 	loggingv1.RegisterLogServiceServer(m.grpcSrv, m)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
@@ -498,6 +516,25 @@ func estimateSize(entry map[string]any) int64 {
 
 func cfgMaxSizeMB(bytes int64) int64 {
 	return bytes / (1024 * 1024)
+}
+
+// resolveGRPCAddr prefers loopback when plaintext is explicitly enabled and the
+// bind address would otherwise listen on all interfaces.
+func resolveGRPCAddr(addr string) string {
+	if !grpctls.InsecureAllowed() {
+		return addr
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.HasPrefix(addr, ":") {
+			return "127.0.0.1" + addr
+		}
+		return addr
+	}
+	if host == "" || host == "0.0.0.0" {
+		return "127.0.0.1:" + port
+	}
+	return addr
 }
 
 // SetListener attaches a net.Listener before Start (tests).
