@@ -28,7 +28,7 @@ MVP_ENABLE_LOGGING_FILE=1
 |---------|---------|-------------|
 | `LOG_FILE_PATH` | `/var/lib/logging-file/module.log` | Log file path |
 | `LOG_ALLOWED_ROOT` | parent of `LOG_FILE_PATH` | Allowed directory for runtime `log_path` changes |
-| `LOG_GRPC_ADDR` | `:9625` | gRPC listen address |
+| `LOG_GRPC_ADDR` | `127.0.0.1:9625` | gRPC listen address |
 | `LOG_STDOUT` | `false` | Mirror logs to stdout (`true`, `1`, `yes`, or `on`) |
 | `LOG_LEVEL` | `info` | Minimum log level (`debug`, `info`, `warn`, `error`) |
 | `LOG_FLUSH_MS` | `250` | Background buffer flush interval (ms); each log also flushes |
