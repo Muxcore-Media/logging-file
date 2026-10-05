@@ -3,7 +3,7 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=0.1.2" -o /logging-file ./cmd/module
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /logging-file ./cmd/module
 
 FROM gcr.io/distroless/static-debian12:nonroot
 ENV LOG_FILE_PATH=/tmp/logging-file/module.log

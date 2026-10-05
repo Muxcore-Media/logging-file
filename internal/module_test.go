@@ -20,6 +20,8 @@ import (
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	loggingv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/logging/v1"
+	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
+	manifest "github.com/Muxcore-Media/logging-file"
 )
 
 func TestEnvRotationConfig(t *testing.T) {
@@ -53,14 +55,13 @@ func TestEnvStdoutTruthy(t *testing.T) {
 }
 
 func TestModuleInfo(t *testing.T) {
-	Version = "0.1.2"
 	m := NewModule(Config{})
 	info := m.Info()
 	if info.ID == "" {
 		t.Error("module ID must not be empty")
 	}
-	if info.Version != "0.1.2" {
-		t.Errorf("version = %q want 0.1.2", info.Version)
+	if want := modulesdk.ManifestVersion(manifest.ManifestJSON); info.Version != want {
+		t.Errorf("version = %q, want manifest version %q", info.Version, want)
 	}
 	if info.MinCoreVersion == "" {
 		t.Error("MinCoreVersion must not be empty")

@@ -154,7 +154,7 @@ func NewModule(cfg Config) *Module {
 }
 
 func (m *Module) Info() contracts.ModuleInfo {
-	ver := Version
+	ver := moduleVersion()
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Logging File",

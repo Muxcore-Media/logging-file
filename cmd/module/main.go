@@ -9,7 +9,7 @@ import (
 	"github.com/Muxcore-Media/logging-file/internal"
 )
 
-var version = "0.0.0-dev"
+var version string // optional -ldflags override; muxcore.json is the default (ADR-0021)
 
 func main() {
 	internal.Version = version
