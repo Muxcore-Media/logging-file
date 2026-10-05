@@ -1,7 +1,7 @@
 {
   "name": "Logging File",
   "description": "File-backed structured logging provider with JSONL output, log rotation, and dynamic level control",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "author": "MuxCore",
   "roles": [
     "infrastructure"
