@@ -23,6 +23,8 @@ const bufSize = 1 << 20
 
 func startTestServer(t *testing.T, logPath string) (*grpc.ClientConn, func()) {
 	t.Helper()
+	// The module enables TLS by default; this test dials plaintext over bufconn.
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	mod := internal.NewModule(internal.Config{
 		LogPath:    logPath,
 		GRPCAddr:   "127.0.0.1:0",
